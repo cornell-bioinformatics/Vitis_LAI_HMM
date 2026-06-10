@@ -1,9 +1,0 @@
-{
-  "centroid_to_within_distance_ratio_pc": 7.379604982171078,
-  "mean_pairwise_centroid_distance_pc": 50.071026546255425,
-  "mean_within_clade_distance_pc": 6.785055117072749,
-  "n_features": 34289,
-  "n_samples": 7728,
-  "pc1_explained_variance": 0.3183318177045925,
-  "pc2_explained_variance": 0.17923363447171395
-}
