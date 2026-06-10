@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-LAI_HMM_v4.py
+LAI_HMM_v0.4.py
 
 Pipeline to infer population/species/clade of origin across segments of the genome from marker data (VCF and/or hap_genotype-format matrix of multiallelic genotypes) 
 
@@ -87,7 +87,7 @@ HMM_DEFAULTS = {
     "hom_soften_delta": 0.1,
     "hom_soften_width": 0.6,
     "hom_min_mix": 0.6,
-    "hom_neutral": 0.60,
+    "hom_neutral": 0.5,
     "tau": 1.0,
 }
 CHR20_START_BP = 21_600_000
@@ -211,25 +211,24 @@ def load_vcf_chunk_matrix(
     if not contigs:
         vcf.close()
         raise ValueError(f"VCF header contigs empty or do not match expectation")
+    use_marker_annotations = require_marker or vcf_has_any_marker_annotations(vcf, contigs)
 
     # -------- Pass 1: enumerate loci and build row maps (robust to ordering) --------
     loci: List[Tuple[str,int,str,str,str,List[str]]] = []
     # per-contig: map (pos, id_or_marker) -> row index
     rowmap: Dict[str, Dict[Tuple[int, str], int]] = {c: {} for c in contigs}
 
-    # ensure only one marker name per variant
-    def norm_marker(m):
-        if isinstance(m, (list, tuple)):
-            return (m[0] if m else None)
-        return m
-
     unnamed_marker_count = 0
     #errors = []
     for chrom in contigs:
         for rec in vcf(f"{chrom}"):
-            marker = norm_marker(rec.INFO.get("MARKER"))
+            marker = resolve_vcf_marker_name(
+                rec,
+                require_marker=require_marker,
+                use_marker_annotations=use_marker_annotations,
+            )
 
-            if (marker is None or marker in (".", "", "None")) and require_marker:
+            if marker is None:
                 unnamed_marker_count = unnamed_marker_count + 1
                 #errors.append(f"{rec.CHROM}:{rec.POS}")
                 continue
@@ -240,12 +239,12 @@ def load_vcf_chunk_matrix(
                 str(rec.CHROM),
                 int(rec.POS),
                 str(rid),
-                "" if marker is None else str(marker),
+                str(marker),
                 str(rec.REF).upper(),
                 alt_list
             ))
             # row key prefers ID if present, else marker
-            key = (int(rec.POS), str(rid) if rec.ID not in (None, ".", "") else ("" if marker is None else str(marker)))
+            key = (int(rec.POS), str(rid) if rec.ID not in (None, ".", "") else str(marker))
             rowmap[chrom][key] = row
 
     if debug == True:
@@ -274,11 +273,15 @@ def load_vcf_chunk_matrix(
     for chrom in contigs:
         rmap = rowmap[chrom]
         for rec in vcf(f"{chrom}"):
-            marker = norm_marker(rec.INFO.get("MARKER"))
-            if (marker is None or marker in (".", "", "None")) and require_marker:
+            marker = resolve_vcf_marker_name(
+                rec,
+                require_marker=require_marker,
+                use_marker_annotations=use_marker_annotations,
+            )
+            if marker is None:
                 continue
             rid_present = rec.ID not in (None, ".", "")
-            key = (int(rec.POS), str(rec.ID) if rid_present else ("" if marker is None else str(marker)))
+            key = (int(rec.POS), str(rec.ID) if rid_present else str(marker))
             row = rmap.get(key)
             if row is None:
                 continue  # shouldn’t happen; safety for edge cases
@@ -878,10 +881,7 @@ def load_variant_profiles(tsv_path: str, clades: Optional[Sequence[str]] = None)
 def marker_df_from_chunk(chunk: VCFChunk) -> pd.DataFrame:
     df = chunk.locus_df
     # ensure numeric chrom for ordering; keep string too
-    def _chrom_num(x):
-        try: return int(str(x))
-        except: return np.nan
-    df["Chrom_numeric"] = df["chrom"].astype(str).map(_chrom_num)
+    df["Chrom_numeric"] = df["chrom"].astype(str).map(chrom_to_numeric)
     df = df.dropna(subset=["Chrom_numeric"])
     # Collapse to one row per marker using median pos
     marker_df = (df.groupby("marker", as_index=False)
@@ -903,18 +903,11 @@ def build_variant_pos_df(variants: List[VCFVariant]) -> pd.DataFrame:
     import re
     rows = []
 
-    def _chrom_to_numeric(ch: str):
-        c = str(ch)
-        try:
-            return int(c)
-        except Exception:
-            return np.nan
-
     for v in variants:
         marker = v.marker
         chrom = v.chrom
         pos = v.pos
-        cn = _chrom_to_numeric(chrom)
+        cn = chrom_to_numeric(chrom)
         rows.append({
             "Marker": marker,
             "Chrom": str(chrom),
@@ -963,6 +956,50 @@ def load_pickle(path: str) -> Any:
     """Load a pickle file used for haplotype frequency or strict diagnostic dictionaries."""
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+def normalize_vcf_marker_value(marker: Any) -> Optional[str]:
+    """Normalize a VCF INFO/MARKER value to a clean string or None."""
+    if isinstance(marker, (list, tuple)):
+        marker = marker[0] if marker else None
+    if marker is None:
+        return None
+    marker = str(marker).strip()
+    return None if marker in {"", ".", "None"} else marker
+
+
+def variant_site_label(chrom: Any, pos: Any) -> str:
+    """Fallback site label for unlabeled VCF-only records."""
+    return f"{str(chrom)}:{int(pos)}"
+
+
+def vcf_has_any_marker_annotations(vcf: Any, contigs: Sequence[str]) -> bool:
+    """Return True if any selected VCF record has a usable INFO/MARKER value."""
+    for chrom in contigs:
+        for rec in vcf(f"{chrom}"):
+            if normalize_vcf_marker_value(rec.INFO.get("MARKER")) is not None:
+                return True
+    return False
+
+
+def resolve_vcf_marker_name(
+    rec: Any,
+    require_marker: bool = True,
+    use_marker_annotations: bool = False,
+) -> Optional[str]:
+    """
+    Resolve the marker label for a VCF record.
+
+    If marker annotations are in use for this VCF, unlabeled records are omitted.
+    Otherwise, unlabeled VCF-only records fall back to CHROM:POS so each variant
+    position is treated as its own ancestry site.
+    """
+    marker = normalize_vcf_marker_value(rec.INFO.get("MARKER"))
+    if marker is not None:
+        return marker
+    if require_marker or use_marker_annotations:
+        return None
+    return variant_site_label(rec.CHROM, rec.POS)
 
 
 def resolve_require_marker(
@@ -1350,19 +1387,19 @@ def calculate_variant_reference_frequencies(
     vcf = VCF(vcf_path, gts012=True, samples=ref_samples)
     sample_clades = [sample_clade[s] for s in vcf.samples]
     contig_list = [c for c in vcf.seqnames if contigs is None or c in contigs]
+    use_marker_annotations = require_marker or vcf_has_any_marker_annotations(vcf, contig_list)
     rows = []
     freq_map: Dict[Tuple[str, int, str], np.ndarray] = {}
-
-    def norm_marker(m):
-        if isinstance(m, (list, tuple)):
-            return (m[0] if m else None)
-        return m
 
     try:
         for chrom in contig_list:
             for rec in vcf(f"{chrom}"):
-                marker = norm_marker(rec.INFO.get("MARKER"))
-                if (marker is None or marker in (".", "", "None")) and require_marker:
+                marker = resolve_vcf_marker_name(
+                    rec,
+                    require_marker=require_marker,
+                    use_marker_annotations=use_marker_annotations,
+                )
+                if marker is None:
                     continue
                 alleles = [str(rec.REF).upper()] + [str(a).upper() for a in (rec.ALT or [])]
                 counts = {c: np.zeros(len(alleles), dtype=float) for c in clades}
@@ -1379,7 +1416,7 @@ def calculate_variant_reference_frequencies(
                         "CHROM": str(rec.CHROM),
                         "POS": int(rec.POS),
                         "ID": rec.ID if rec.ID not in (None, "") else ".",
-                        "MARKER": "" if marker is None else str(marker),
+                        "MARKER": str(marker),
                         "REF": str(rec.REF).upper(),
                         "ALTS": ",".join([str(a).upper() for a in (rec.ALT or [])]),
                         "ALLELE_INDEX": f"a{ix}",
@@ -3689,16 +3726,16 @@ def build_arg_parser():
         epilog="""
 Examples:
   Build reference files only:
-    python LAI_HMM_v4.py --step build-reference --hap-genotype hap_genotype.tsv --vcf reference.vcf.gz --reference-membership sample_groups.tsv --clades EA,Mus,NA,Vv --outdir reference_files
+    python LAI_HMM_v0.4.py --step build-reference --hap-genotype example_data/hap_genotype_refset_example --vcf example_data/example_refset.vcf.gz --reference-membership example_data/example_reference_membership.tsv --clades EA,Mus,NA1,NA2,Vv --reference-outdir demo_reference --pca
 
   VCF only:
-    python LAI_HMM_v4.py --vcf cohort.vcf.gz --variant-profiles clade_variant_profiles.tsv --marker-positions marker_positions.csv --sample SAMPLE1
+    python LAI_HMM_v0.4.py --vcf example_data/example_samples.vcf.gz --variant-profiles example_data/reference_variant_profiles.tsv --marker-positions example_data/marker_positions.csv --no-plots --sample SAMPLE1
 
   hap_genotype only:
-    python LAI_HMM_v4.py --hap-genotype hap_genotype.tsv.gz --hap-frequencies allele_freq_lookup.pkl --marker-positions marker_positions.csv --all-samples
+    python LAI_HMM_v0.4.py --hap-genotype example_data/hap_genotype_samples_example --hap-frequencies example_data/reference_hap_allele_frequency_lookup.pkl --marker-positions example_data/marker_positions.csv --chrom-lengths example_data/chrom_lengths.fai --all-samples
 
   combined VCF + hap_genotype, four worker threads:
-    python LAI_HMM_v4.py --vcf cohort.vcf.gz --hap-genotype hap_genotype.tsv.gz --variant-profiles clade_variant_profiles.tsv --hap-frequencies allele_freq_lookup.pkl --hap-informativeness haplotype_alleleID_informativeness_scores.txt --marker-positions marker_positions.csv --all-samples --threads 4
+    python LAI_HMM_v0.4.py --vcf example_data/example_samples.vcf.gz --hap-genotype example_data/hap_genotype_samples_example --variant-profiles example_data/reference_variant_profiles.tsv --hap-frequencies example_data/reference_hap_allele_frequency_lookup.pkl --hap-informativeness example_data/reference_hap_allele_informativeness.tsv --marker-positions example_data/marker_positions.csv --chrom-lengths example_data/chrom_lengths.fai --all-samples --threads 4
 """,
     )
 
@@ -3716,7 +3753,7 @@ Examples:
     inputs.add_argument("--mus-hap-alleles", dest="mus_hap_alleles", help="Optional Mus chr20 diagnostic hap allele CSV/TSV.")
     inputs.add_argument("--nonmus-hap-alleles", dest="nonmus_hap_alleles", help="Optional non-Mus chr7 diagnostic hap allele CSV/TSV.")
     inputs.add_argument("--chrom-lengths", "--chrom_lengths", dest="chrom_lengths", help="Optional chromosome length table or FASTA .fai for plotting.")
-    inputs.add_argument("--pca", action="store_true", help="Run PCA on reference samples and save the top 10 PCs as reference outputs. Requires --build-reference step.")
+    inputs.add_argument("--pca", action="store_true", help="Run PCA on reference samples and save PCA coordinates, metrics, and plots as reference outputs. Requires --step build-reference.")
 
     samples = parser.add_argument_group("samples and output")
     samples.add_argument("--sample", action="append", help="Sample name to run. Can be repeated or comma-separated.")
@@ -3734,7 +3771,7 @@ Examples:
     model = parser.add_argument_group("model parameters")
     model.add_argument("--clades", default="EA,Mus,NA1,NA2,Vv", help="Comma-separated group/clade/population/species names in the order used by reference profiles.")
     model.add_argument("--contigs", help="Comma-separated VCF contigs to load, for example chr01,chr02.")
-    model.add_argument("--allow-missing-marker", action="store_true", help="Legacy compatibility flag for VCF-only workflows. Combined VCF + hap_genotype runs still require INFO/MARKER.")
+    model.add_argument("--allow-missing-marker", action="store_true", help="Legacy compatibility flag for VCF-only workflows. If the selected VCF records do not use INFO/MARKER, unlabeled variants fall back to CHROM:POS site labels; otherwise unlabeled records are skipped. Combined VCF + hap_genotype runs still require INFO/MARKER.")
     model.add_argument("--lam-per-Mb", "--lam_per_Mb", dest="lam_per_Mb", type=float, default=HMM_DEFAULTS["lam_per_Mb"])
     model.add_argument("--strict-boost", "--strict_boost", dest="strict_boost", type=float, default=HMM_DEFAULTS["strict_boost"])
     model.add_argument("--cap-total-boost-per-marker", "--cap_total_boost_per_marker", dest="cap_total_boost_per_marker", type=float, default=HMM_DEFAULTS["cap_total_boost_per_marker"])
