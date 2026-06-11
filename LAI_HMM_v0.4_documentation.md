@@ -46,14 +46,14 @@ Example inputs are in the `example_data/` directory for testing the pipeline:
 
 **Reference-panel inputs:**
 
-- `example_data/example_refset.vcf.gz` and `example_data/example_refset.vcf.gz.csi`
-- `example_data/hap_genotype_refset_example`
-- `example_data/example_reference_membership.tsv`
+- `example_data/refset.vcf.gz` and `example_data/refset.vcf.gz.csi`
+- `example_data/hap_genotype_refset.gz`
+- `example_data/reference_samples.tsv`
 
 **Sample inputs to infer ancestry for:**
 
-- `example_data/example_samples.vcf.gz` and `example_data/example_samples.vcf.gz.csi`
-- `example_data/hap_genotype_samples_example`
+- `example_data/samples.vcf.gz` and `example_data/samples.vcf.gz.csi`
+- `example_data/hap_genotype_samples.gz`
 
 **Genome coordinate inputs:**
 
@@ -62,8 +62,9 @@ Example inputs are in the `example_data/` directory for testing the pipeline:
 
 **Precomputed clade-specific allele frequency and informativeness files:**
 
-- `example_data/reference_variant_profiles.tsv`
-- `example_data/reference_hap_allele_informativeness.tsv`
+- `example_output/reference_variant_profiles.tsv`
+- `example_output/reference_hap_allele_frequencies.tsv`
+- `example_output/reference_hap_allele_informativeness.tsv`
 
 
 
@@ -240,7 +241,7 @@ python LAI_HMM_v0.4.py \
   --chrom-lengths example_data/chrom_lengths.fai \
   --clades EA,Mus,NA1,NA2,Vv \
   --threads 4 \
-  --outdir example_results_combined
+  --outdir example_output/results_combined
 ```
 
 
@@ -250,8 +251,8 @@ VCF-based runs require `--variant-profiles` which gives variant allele frequenci
 
 ```bash
 python LAI_HMM_v0.4.py \
-  --vcf example_data/example_samples.vcf.gz \
-  --variant-profiles example_data/reference_variant_profiles.tsv \
+  --vcf example_data/samples.vcf.gz \
+  --variant-profiles example_output/reference_variant_profiles.tsv \
   --marker-positions example_data/marker_positions.csv \
   --chrom-lengths example_data/chrom_lengths.fai \
   --clades EA,Mus,NA1,NA2,Vv \
@@ -264,9 +265,9 @@ Hap_genotype-based runs require `--hap-frequencies` and `hap-informativeness` wh
 
 ```bash
 python LAI_HMM_v0.4.py \
-  --hap-genotype example_data/hap_genotype_samples_example \
-  --hap-frequencies example_data/reference_hap_allele_frequencies.tsv \
-  --hap-informativeness example_data/reference_hap_allele_informativeness.tsv \
+  --hap-genotype example_data/hap_genotype_samples.gz \
+  --hap-frequencies example_output/reference_hap_allele_frequencies.tsv \
+  --hap-informativeness example_output/reference_hap_allele_informativeness.tsv \
   --marker-positions example_data/marker_positions.csv \
   --chrom-lengths example_data/chrom_lengths.fai \
   --clades EA,Mus,NA1,NA2,Vv \
@@ -282,11 +283,11 @@ The default, `--all-samples`, will run the pipeline on all of the samples presen
 
 ```bash
 python LAI_HMM_v0.4.py \
-  --vcf example_data/example_samples.vcf.gz \
-  --hap-genotype example_data/hap_genotype_samples_example \
-  --variant-profiles example_data/reference_variant_profiles.tsv \
-  --hap-frequencies example_data/reference_hap_allele_frequencies.tsv \
-  --hap-informativeness example_data/reference_hap_allele_informativeness.tsv \
+  --vcf example_data/samples.vcf.gz \
+  --hap-genotype example_data/hap_genotype_samples.gz \
+  --variant-profiles example_output/reference_variant_profiles.tsv \
+  --hap-frequencies example_output/reference_hap_allele_frequencies.tsv \
+  --hap-informativeness example_output/reference_hap_allele_informativeness.tsv \
   --marker-positions example_data/marker_positions.csv \
   --chrom-lengths example_data/chrom_lengths.fai \
   --clades EA,Mus,NA1,NA2,Vv \
@@ -302,9 +303,9 @@ In this case, the reference samples must exist in the same VCF/hap_genotype file
 
 ```bash
 python LAI_HMM_v0.4.py \
-  --vcf example_data/example_refset.vcf.gz \
-  --hap-genotype example_data/hap_genotype_refset_example.gz \
-  --reference-membership example_data/example_reference_membership.tsv \
+  --vcf example_data/refset.vcf.gz \
+  --hap-genotype example_data/hap_genotype_refset.gz \
+  --reference-membership example_data/reference_samples.tsv \
   --all-samples \
   --marker-positions example_data/marker_positions.csv \
   --chrom-lengths example_data/chrom_lengths.fai \
@@ -331,8 +332,8 @@ Examples for individual steps:
 # Build reference files only
 python LAI_HMM_v0.4.py \
   --step build-reference \
-  --hap-genotype example_data/hap_genotype_refset_example.gz \
-  --reference-membership example_data/example_reference_membership.tsv \
+  --hap-genotype example_data/hap_genotype_refset.gz \
+  --reference-membership example_data/reference_samples.tsv \
   --clades EA,Mus,NA1,NA2,Vv \
   --reference-outdir reference \
   --pca hap
@@ -340,26 +341,26 @@ python LAI_HMM_v0.4.py \
 # Calculate variant informativeness only from existing variant allele frequency information
 python LAI_HMM_v0.4.py \
   --step variant-informativeness \
-  --variant-profiles example_data/reference_variant_profiles.tsv \
+  --variant-profiles example_output/reference_variant_profiles.tsv \
   --clades EA,Mus,NA1,NA2,Vv \
   --outdir example_output
 
 # Calculate microhaplotype allele informativeness only
 python LAI_HMM_v0.4.py \
   --step hap-informativeness \
-  --hap-frequencies example_output/reference/reference_hap_allele_frequencies.tsv \
+  --hap-frequencies example_output/reference_hap_allele_frequencies.tsv \
   --clades EA,Mus,NA1,NA2,Vv \
   --outdir example_output
 
 # LAI only (without generating chromosome painting figures), using precomputed reference files
 python LAI_HMM_v0.4.py \
   --step run-hmm \
-  --vcf example_data/example_samples.vcf.gz \
-  --hap-genotype example_data/hap_genotype_samples_example \
+  --vcf example_data/samples.vcf.gz \
+  --hap-genotype example_data/hap_genotype_samples.gz \
   --marker-positions example_data/marker_positions.csv \
-  --variant-profiles example_data/reference_variant_profiles.tsv \
-  --hap-frequencies example_data/reference_hap_allele_frequencies.tsv \
-  --hap-informativeness example_data/reference_hap_allele_informativeness.tsv \
+  --variant-profiles example_output/reference_variant_profiles.tsv \
+  --hap-frequencies example_output/reference_hap_allele_frequencies.tsv \
+  --hap-informativeness example_output/reference_hap_allele_informativeness.tsv \
   --clades EA,Mus,NA1,NA2,Vv \
   --sample SampleA \
   --no-plots \
@@ -583,9 +584,9 @@ spec.loader.exec_module(lai)
 outputs = lai.build_reference_files(
     outdir="reference",
     clades=["EA", "Mus", "NA1", "NA2", "Vv"],
-    membership_path="example_data/example_reference_membership.tsv",
-    hap_genotype_path="example_data/hap_genotype_refset_example",
-    vcf_path="example_data/example_refset.vcf.gz",
+    membership_path="example_data/reference_samples.tsv",
+    hap_genotype_path="example_data/hap_genotype_refset.gz",
+    vcf_path="example_data/refset.vcf.gz",
     pca=True,
     verbose=True,
 )
@@ -606,12 +607,12 @@ assert spec.loader is not None
 spec.loader.exec_module(lai)
 
 result = lai.run_lai_hmm(
-    vcf_path="example_data/example_samples.vcf.gz",
-    hap_genotype_path="example_data/hap_genotype_samples_example",
+    vcf_path="example_data/samples.vcf.gz",
+    hap_genotype_path="example_data/hap_genotype_samples.gz",
     marker_positions_path="example_data/marker_positions.csv",
-    variant_profiles_path="example_data/reference_variant_profiles.tsv",
-    hap_freq_lookup_path="example_data/reference_hap_allele_frequencies.tsv",
-    hap_informativeness_path="example_data/reference_hap_allele_informativeness.tsv",
+    variant_profiles_path="example_output/reference_variant_profiles.tsv",
+    hap_freq_lookup_path="example_output/reference_hap_allele_frequencies.tsv",
+    hap_informativeness_path="example_output/reference_hap_allele_informativeness.tsv",
     clades=["EA", "Mus", "NA1", "NA2", "Vv"],
     sample="SampleA",
     outdir="results",
@@ -673,7 +674,7 @@ or regenerate it from the frequency lookup:
 ```bash
 python LAI_HMM_v0.4.py \
   --step hap-informativeness \
-  --hap-frequencies example_data/reference_hap_allele_frequencies.tsv \
+  --hap-frequencies example_output/reference_hap_allele_frequencies.tsv \
   --clades EA,Mus,NA1,NA2,Vv \
   --outdir reference
 ```
