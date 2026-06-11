@@ -3170,7 +3170,7 @@ def _build_params_dict(kwargs: Dict[str, Any], outdir: str, clades: Sequence[str
     params["Kclust"] = len(clades)
     params["clades"] = list(clades)
     params.setdefault("refv", "NA")
-    params.setdefault("modelv", "4")
+    params.setdefault("modelv", "0.4")
     params.setdefault("vcf_refv", "NA")
     return params
 
@@ -3320,6 +3320,8 @@ def run_lai_hmm(
     write_log: bool = True,
     reference_pca: Optional[str] = None,
     reference_pca_downsample: float = 1.0,
+    refv: str = "NA",
+    vcf_refv: str = "NA",
     verbose: bool = True,
     debug: bool = False,
     **hmm_kwargs
@@ -3424,6 +3426,8 @@ def run_lai_hmm(
             "hom_min_mix": hmm_kwargs.get("hom_min_mix", HMM_DEFAULTS["hom_min_mix"]),
             "hom_neutral": hmm_kwargs.get("hom_neutral", HMM_DEFAULTS["hom_neutral"]),
             "verbose": verbose,
+            "refv": refv,
+            "vcf_refv": vcf_refv,
         },
         outdir,
         clades,
@@ -3781,20 +3785,23 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
         plt.close(fig)
         return
 
+    chromosome_items = list(zip(plottable, chrom_max_lengths))
     maxL = max(chrom_max_lengths)   # the global x-axis maximum
 
-    fig, ax = plt.subplots(figsize=(12, max(3, len(chromosomes) * 0.9)))
+    fig, ax = plt.subplots(figsize=(12, max(3, len(chromosome_items) * 0.9)))
     ax.set_xlim(0, maxL)
-
-    # invert to make chrom 1 appear at the top
-    ax.invert_yaxis()
 
     ax.set_facecolor("white")                    # white background
     ax.grid(False, which='both', axis='both')    # no x and y grids
 
+    def _chrom_display_label(chrom: str) -> str:
+        s = str(chrom).strip()
+        s = re.sub(r"^(chromosome|chrom|chr)[_\-\s]*", "", s, flags=re.IGNORECASE)
+        if re.fullmatch(r"\d+", s):
+            return f"Chr {int(s)}"
+        return f"Chr {s}"
 
-    for i, chrom in enumerate(chromosomes):
-        chrom_key = str(chrom)
+    for i, (chrom_key, L) in enumerate(chromosome_items):
         chrom_data = df.loc[df['Chrom'] == chrom_key].copy()
 
         # Sort per-haplotype by position
@@ -3805,9 +3812,6 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
         if pos.size == 0:
             # nothing to draw for this chromosome
             continue
-
-        # Chromosome length (bp)
-        L = chrom_max_lengths[i]
 
         # Edges by midpoints between marker positions
         mids = (pos[:-1].astype(np.float64) + pos[1:].astype(np.float64)) / 2.0
@@ -3857,7 +3861,6 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
                     facecolor=clade_colors.get(clade, 'gray'), edgecolor='none',
                     linewidth=0, antialiased=False, zorder=3, alpha=alpha))
 
-        
         if markerticks == True:
             # Get unique tick positions for this chromosome where markers are NOT missing
             ticks = (
@@ -3868,22 +3871,19 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
             
             y0, y1 = i + 0.50, i + 0.35
             ax.vlines(ticks['Pos'].to_numpy(), y0, y1, color='k', linewidth=0.8, zorder=6)
-                    
-
-        # Chromosome label at left
-        plt.text(-2_500_000, i, f'Chr {i+1}', va='center', ha='right', fontsize=20)
-        
-
 
     # Aesthetics
     pad = 0.05 * maxL   # 2% of the chromosome length padding on either side
     ax.set_xlim(-pad, maxL + pad) # set x-axis limit to max chrom length + padding
+    ax.set_ylim(len(chromosome_items) - 0.5, -0.5)
 
     # Format x-axis ticks in Mbp (bp / 1e6)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x/1e6:.0f}"))
     ax.set_xlabel("Physical Position (Mbp)", fontsize=20)
     
-    ax.set_yticks([])
+    ax.set_yticks(np.arange(len(chromosome_items)))
+    ax.set_yticklabels([_chrom_display_label(chrom) for chrom, _ in chromosome_items], fontsize=20)
+    ax.tick_params(axis='y', length=0, pad=12, labelsize=20)
     ax.tick_params(axis='x', labelsize=20)
     ax.set_title(f"Clade Assignment for {indv}", fontsize=20)
     fig.tight_layout()
@@ -3901,7 +3901,7 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
     if markerticks == True:
         legend_handles.append(
             mlines.Line2D([], [], color='k', linestyle='None', marker='|', markersize=18,
-                          markeredgewidth=2, label='rhAmpSeq markers'))
+                          markeredgewidth=2, label='Markers'))
     ax.legend(handles=legend_handles, title="Clade (certainty = opacity)",
               bbox_to_anchor=(0.97, 0.98), loc='upper center', fontsize=20, title_fontsize=20,
              framealpha=1)
@@ -4005,6 +4005,8 @@ Examples:
     samples.add_argument("--no-plots", "--no_plots", dest="plots", action="store_false", help="Skip chromosome painting figures.")
     samples.add_argument("--show-plots", "--show_plots", dest="show_plots", action="store_true", help="Display plots interactively while saving them.")
     samples.add_argument("--no-save", dest="save_outputs", action="store_false", help="Run without writing CSV/plot/log outputs.")
+    samples.add_argument("--refv", default="NA", help="Reference version label to record in outputs and plot footers.")
+    samples.add_argument("--vcf-refv", "--vcf_refv", dest="vcf_refv", default="NA", help="VCF reference/profile version label to record in outputs and plot footers.")
     samples.set_defaults(save_outputs=True)
 
     model = parser.add_argument_group("model parameters")
@@ -4117,6 +4119,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         save_outputs=args.save_outputs,
         reference_pca=args.pca,
         reference_pca_downsample=downsample,
+        refv=args.refv,
+        vcf_refv=args.vcf_refv,
         verbose=args.verbose,
         debug=args.debug,
         lam_per_Mb=args.lam_per_Mb,

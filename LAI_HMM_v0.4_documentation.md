@@ -219,17 +219,32 @@ The optional `--downsample` argument randomly keeps only a specified proportion 
 ```bash
 python LAI_HMM_v0.4.py \
   --step build-reference \
-  --vcf example_data/example_refset.vcf.gz \
-  --hap-genotype example_data/hap_genotype_refset_example.gz \
-  --reference-membership example_data/example_reference_membership.tsv \
-  --clades EA,Mus,NA,Vv \
-  --reference-outdir reference \
-  --pca both \
-  --downsample 0.5
+  --vcf example_data/refset.vcf.gz \
+  --hap-genotype example_data/hap_genotype_refset.gz \
+  --reference-membership example_data/reference_samples.tsv \
+  --clades EA,Mus,NA1,NA2,Vv \
+  --reference-outdir example_output \
+  --pca
+```
+
+### 2. Run combined VCF + hap_genotype LAI for all samples with multiple threads
+
+```bash
+python LAI_HMM_v0.4.py \
+  --vcf example_data/samples.vcf.gz \
+  --hap-genotype example_data/hap_genotype_samples.gz \
+  --variant-profiles example_output/reference_variant_profiles.tsv \
+  --hap-frequencies example_output/reference_hap_allele_frequencies.tsv \
+  --hap-informativeness example_output/reference_hap_allele_informativeness.tsv \
+  --marker-positions example_data/marker_positions.csv \
+  --chrom-lengths example_data/chrom_lengths.fai \
+  --clades EA,Mus,NA1,NA2,Vv \
+  --threads 4 \
+  --outdir example_results_combined
 ```
 
 
-### 2. Run VCF-only LAI with precomputed allele frequencies
+### 3. Run VCF-only LAI with precomputed allele frequencies
 
 VCF-based runs require `--variant-profiles` which gives variant allele frequencies and informativeness scores.
 
@@ -243,7 +258,7 @@ python LAI_HMM_v0.4.py \
   --outdir results_vcf_only
 ```
 
-### 3. Run hap_genotype-only LAI with precomputed haplotype frequencies
+### 4. Run hap_genotype-only LAI with precomputed haplotype frequencies
 
 Hap_genotype-based runs require `--hap-frequencies` and `hap-informativeness` which give microhaplotype allele frequencies and informativeness scores, respectively.
 
@@ -258,7 +273,7 @@ python LAI_HMM_v0.4.py \
   --outdir results_hap_only
 ```
 
-### 4. Run combined VCF + hap_genotype LAI for individual sample(s)
+### 5. Run combined VCF + hap_genotype LAI for individual sample(s)
 
 The `--sample` option can be used to specify an individual sample ID or a comma-separated list of sample IDs to run the pipeline on.
 The `--samples-file` option can be used to input a list of samples.
@@ -277,22 +292,6 @@ python LAI_HMM_v0.4.py \
   --clades EA,Mus,NA1,NA2,Vv \
   --sample SAMPLE1 \
   --outdir results
-```
-
-### 5. Run combined VCF + hap_genotype LAI for all samples with multiple threads
-
-```bash
-python LAI_HMM_v0.4.py \
-  --vcf example_data/example_samples.vcf.gz \
-  --hap-genotype example_data/hap_genotype_samples_example \
-  --variant-profiles example_data/reference_variant_profiles.tsv \
-  --hap-frequencies example_data/reference_hap_allele_frequencies.tsv \
-  --hap-informativeness example_data/reference_hap_allele_informativeness.tsv \
-  --marker-positions example_data/marker_positions.csv \
-  --chrom-lengths example_data/chrom_lengths.fai \
-  --clades EA,Mus,NA1,NA2,Vv \
-  --threads 4 \
-  --outdir results_combined
 ```
 
 
