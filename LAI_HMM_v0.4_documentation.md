@@ -212,17 +212,20 @@ Plotting is enabled by default. If you do not provide chromosome lengths, includ
 
 `--step build-reference` is a helper to create clade-specific allele frequency files from VCF and/or hap_genotype files.
 You can build only haplotype reference files by omitting `--vcf`, or only VCF reference files by omitting `--hap-genotype`.
-The optional `--pca` flag runs principal component analysis of the reference samples and computes population differentiation metrics to help evaluate how distinct the clades/groups are.
+The optional `--pca` option runs principal component analysis of the reference samples and computes population differentiation metrics to help evaluate how distinct the clades/groups are.
+Use `--pca` by itself to run PCA on whichever reference input types were provided, or specify `--pca hap`, `--pca vcf`, or `--pca both` to control the source explicitly.
+The optional `--downsample` argument randomly keeps only a specified proportion of PCA feature columns before PCA, which can reduce runtime on large matrices. The default is `1` (use the full matrix). The same `--pca` and `--downsample` options also apply when reference files are built automatically during the default `--step all` workflow.
 
 ```bash
 python LAI_HMM_v0.4.py \
   --step build-reference \
   --vcf example_data/example_refset.vcf.gz \
-  --hap-genotype example_data/hap_genotype_refset_example \
+  --hap-genotype example_data/hap_genotype_refset_example.gz \
   --reference-membership example_data/example_reference_membership.tsv \
-  --clades EA,Mus,NA1,NA2,Vv \
+  --clades EA,Mus,NA,Vv \
   --reference-outdir reference \
-  --pca
+  --pca both \
+  --downsample 0.5
 ```
 
 
@@ -296,12 +299,12 @@ python LAI_HMM_v0.4.py \
 ### 6. Run the full end-to-end pipeline including building reference files
 
 If precomputed clade-specific allele frequency files are missing and `--reference-membership` is supplied, the default `--step all` workflow first builds reference files under `OUTDIR/reference` and then runs the HMM. 
-In this case, the reference samples must exist in the same VCF/hap_genotype file as the test samples.
+In this case, the reference samples must exist in the same VCF/hap_genotype file as the test samples. If you also provide `--pca` and optionally `--downsample`, those settings are applied to the automatic reference-building step before the HMM run.
 
 ```bash
 python LAI_HMM_v0.4.py \
   --vcf example_data/example_refset.vcf.gz \
-  --hap-genotype example_data/hap_genotype_refset_example \
+  --hap-genotype example_data/hap_genotype_refset_example.gz \
   --reference-membership example_data/example_reference_membership.tsv \
   --all-samples \
   --marker-positions example_data/marker_positions.csv \
@@ -329,10 +332,11 @@ Examples for individual steps:
 # Build reference files only
 python LAI_HMM_v0.4.py \
   --step build-reference \
-  --hap-genotype example_data/hap_genotype_refset_example \
+  --hap-genotype example_data/hap_genotype_refset_example.gz \
   --reference-membership example_data/example_reference_membership.tsv \
   --clades EA,Mus,NA1,NA2,Vv \
-  --reference-outdir reference
+  --reference-outdir reference \
+  --pca hap
 
 # Calculate variant informativeness only from existing variant allele frequency information
 python LAI_HMM_v0.4.py \
@@ -380,7 +384,8 @@ python LAI_HMM_v0.4.py \
 | `--strict-alleles PATH` | Optional pickle of strict diagnostic haplotype alleles. |
 | `--hap-informativeness PATH` | Optional haplotype allele informativeness TSV. Required when combining VCF and `hap_genotype` evidence unless it is being built automatically. |
 | `--chrom-lengths PATH` | Chromosome length table or FASTA `.fai` used for plotting. Required when plots are enabled. |
-| `--pca` | During reference-building, run PCA on reference samples and save PC coordinates, metrics, and plots. |
+| `--pca [auto\|hap\|vcf\|both]` | During reference-building, run PCA on reference samples and save PC coordinates, metrics, and plots. `--pca` by itself defaults to whichever of `--hap-genotype` and/or `--vcf` were provided. `auto` means “use whichever reference inputs were supplied.” `both` requires both `--hap-genotype` and `--vcf`. |
+| `--downsample FLOAT` | During reference-building PCA, randomly retain this proportion of feature columns before PCA. Default: `1`. Example: `--downsample 0.5` keeps about half of the features. Values must be greater than `0` and less than or equal to `1`. |
 | `--mus-hap-alleles PATH` | Optional Muscadine chromosome 20 diagnostic haplotype allele CSV/TSV. |
 | `--nonmus-hap-alleles PATH` | Optional non-Muscadine chromosome 7 diagnostic haplotype allele CSV/TSV. |
 
@@ -438,16 +443,15 @@ For `hap_genotype` reference input:
 
 - `reference_hap_allele_frequencies.tsv`: long table of clade-specific haplotype allele-ID frequencies. This file can be used directly with `--hap-frequencies`.
 - `reference_hap_allele_informativeness.tsv`: haplotype allele-ID informativeness scores.
-- `reference_hap_allele_frequency_lookup.pkl`: pickle lookup used by HMM runs. (alternate format used by previous versions)
-- If `--pca` is used: `reference_hap_pca.tsv`, `reference_hap_pca.png`, and `reference_hap_differentiation_metrics.json`.
+- If `--pca` includes haplotype PCA (`--pca`, `--pca auto`, `--pca hap`, or `--pca both` when `--hap-genotype` is supplied): `reference_hap_pca.tsv`, `reference_hap_pca.png`, and `reference_hap_differentiation_metrics.json`.
 
 For VCF reference input:
 
 - `reference_variant_profiles.tsv`: clade-specific VCF allele frequency/profile table with informativeness columns.
 - `reference_variant_locus_informativeness.tsv`: marker/locus-level variant informativeness.
-- If `--pca` is used: `reference_vcf_pca.tsv`, `reference_vcf_pca.png`, and `reference_vcf_differentiation_metrics.json`.
+- If `--pca` includes VCF PCA (`--pca`, `--pca auto`, `--pca vcf`, or `--pca both` when `--vcf` is supplied): `reference_vcf_pca.tsv`, `reference_vcf_pca.png`, and `reference_vcf_differentiation_metrics.json`.
 
-The differentiation metrics includes explained variance and clade differentiation metrics: mean pairwise centroid distance, mean within-clade distance, and the centroid-to-within-clade distance ratio.
+The differentiation metrics file includes the number of samples, the number of PCA features actually used after any `--downsample` filtering, explained variance, and clade differentiation metrics: mean pairwise centroid distance, mean within-clade distance, and the centroid-to-within-clade distance ratio.
 
 ## HMM outputs
 

@@ -1296,15 +1296,29 @@ def load_reference_membership(
     Accepted group column aliases: clade, group, population, pop, species, index.
     If no column names: assumes the first column is the sample name and the second is the clade/group.
     """
+    sample_aliases = ("sample", "iid", "id", "sample_id")
+    clade_aliases = ("clade", "group", "population", "pop", "species", "index")
+
     df = read_table(path, dtype=str, keep_default_na=False)
     lower_to_col = {str(c).strip().lower(): c for c in df.columns}
-    if sample_col is None:
-        sample_col = next((lower_to_col[a] for a in ("sample", "iid", "id", "sample_id") if a in lower_to_col), df.columns[0])
-    if clade_col is None:
-        clade_col = next((lower_to_col[a] for a in ("clade", "group", "population", "pop", "species", "index") if a in lower_to_col), df.columns[1])
-    if sample_col is None or clade_col is None:
-        raise ValueError("Reference membership file needs sample/IID and clade/group/population columns.")
-    out = df[[sample_col, clade_col]].rename(columns={sample_col: "sample", clade_col: "clade"}).copy()
+    has_named_sample_col = any(alias in lower_to_col for alias in sample_aliases)
+    has_named_clade_col = any(alias in lower_to_col for alias in clade_aliases)
+
+    if sample_col is not None or clade_col is not None or (has_named_sample_col and has_named_clade_col):
+        if sample_col is None:
+            sample_col = next((lower_to_col[a] for a in sample_aliases if a in lower_to_col), None)
+        if clade_col is None:
+            clade_col = next((lower_to_col[a] for a in clade_aliases if a in lower_to_col), None)
+        if sample_col is None or clade_col is None:
+            raise ValueError("Reference membership file needs sample/IID and clade/group/population columns.")
+        out = df[[sample_col, clade_col]].rename(columns={sample_col: "sample", clade_col: "clade"}).copy()
+    else:
+        df = read_table(path, dtype=str, keep_default_na=False, header=None)
+        if df.shape[1] < 2:
+            raise ValueError("Reference membership file needs sample/IID and clade/group/population columns.")
+        out = df.iloc[:, [0, 1]].copy()
+        out.columns = ["sample", "clade"]
+
     out["sample"] = out["sample"].astype(str).str.strip()
     out["clade"] = out["clade"].astype(str).str.strip()
     out = out[(out["sample"] != "") & (out["clade"] != "")]
@@ -1314,12 +1328,65 @@ def load_reference_membership(
     return out
 
 
+def membership_clade_counts(
+    membership: pd.DataFrame,
+    clades: Optional[Sequence[str]] = None,
+) -> pd.Series:
+    """Return per-clade sample counts from the membership table."""
+    counts = membership["clade"].value_counts()
+    if clades is not None:
+        counts = counts.reindex(list(clades), fill_value=0)
+    else:
+        counts = counts.sort_index()
+    counts.name = "n_samples"
+    return counts
+
+
+def select_reference_samples(
+    available_samples: Sequence[str],
+    sample_to_clade: Dict[str, str],
+    clades: Sequence[str],
+    source_name: str,
+) -> Tuple[List[str], pd.Series]:
+    """
+    Select samples present in both the input data and the membership table.
+
+    Raises a clear error when the overlap is empty or does not cover every
+    requested clade, because downstream reference frequencies and PCA would
+    otherwise be silently misleading.
+    """
+    ref_samples = [s for s in available_samples if s in sample_to_clade]
+    if not ref_samples:
+        raise ValueError(
+            f"No reference membership samples were found in the {source_name}. "
+            f"Check that the membership file matches the {source_name} sample names."
+        )
+
+    matched_counts = pd.Series(
+        [sample_to_clade[s] for s in ref_samples],
+        dtype="object",
+    ).value_counts().reindex(list(clades), fill_value=0)
+    matched_counts.name = "matched_samples"
+
+    missing_clades = [c for c in clades if int(matched_counts.get(c, 0)) == 0]
+    if missing_clades:
+        raise ValueError(
+            f"Only {len(ref_samples)} of {len(sample_to_clade)} reference membership samples were found "
+            f"in the {source_name}, and the matched set is missing these requested clades: "
+            f"{missing_clades}\n"
+            f"Reference membership samples present by clade:\n{matched_counts.to_string()}\n"
+            f"This usually means the membership file does not correspond to the {source_name} sample names."
+        )
+    return ref_samples, matched_counts
+
+
 def calculate_hap_reference_frequencies(
     hap_genotype_path: str,
     membership_path: str,
     clades: Sequence[str],
     sep: Optional[str] = None,
     marker_col: Optional[str] = None,
+    verbose: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[Tuple[str, str], np.ndarray], pd.DataFrame]:
     """
     Calculate clade-specific haplotype allele-ID frequencies from a hap_genotype matrix.
@@ -1331,9 +1398,17 @@ def calculate_hap_reference_frequencies(
     missing_clades = sorted(set(sample_clade.values()) - set(clades))
     if missing_clades:
         raise ValueError(f"Membership contains clades not listed in --clades: {missing_clades}")
-    ref_samples = [s for s in hap_gt.columns if s in sample_clade]
-    if not ref_samples:
-        raise ValueError("No membership samples were found in the hap_genotype columns.")
+    ref_samples, matched_counts = select_reference_samples(
+        hap_gt.columns,
+        sample_clade,
+        clades,
+        "hap_genotype columns",
+    )
+    if verbose:
+        print(
+            f"Found {len(ref_samples)} of {len(membership)} reference membership samples "
+            f"in the hap_genotype file for haplotype allele frequency estimation."
+        )
 
     rows = []
     lookup: Dict[Tuple[str, str], np.ndarray] = {}
@@ -1380,9 +1455,12 @@ def calculate_variant_reference_frequencies(
     missing_clades = sorted(set(sample_clade.values()) - set(clades))
     if missing_clades:
         raise ValueError(f"Membership contains clades not listed in --clades: {missing_clades}")
-    ref_samples = [s for s in header_samples if s in sample_clade]
-    if not ref_samples:
-        raise ValueError("No membership samples were found in the VCF header.")
+    ref_samples, _ = select_reference_samples(
+        header_samples,
+        sample_clade,
+        clades,
+        "VCF header",
+    )
 
     vcf = VCF(vcf_path, gts012=True, samples=ref_samples)
     sample_clades = [sample_clade[s] for s in vcf.samples]
@@ -1458,6 +1536,93 @@ def _pca_from_matrix(X: np.ndarray, n_components: int = 2) -> Tuple[np.ndarray, 
     if len(explained) < n_components:
         explained = np.pad(explained, (0, n_components - len(explained)))
     return coords, explained
+
+
+def resolve_pca_targets(
+    pca: Optional[str],
+    *,
+    hap_genotype_path: Optional[str] = None,
+    vcf_path: Optional[str] = None,
+) -> Set[str]:
+    """
+    Resolve which reference inputs should be used for PCA.
+
+    - pca=None disables PCA
+    - pca="auto" runs PCA on whichever reference inputs were provided
+    - pca="hap", "vcf", or "both" explicitly request those sources
+    """
+    if pca in (None, False):
+        return set()
+
+    available = set()
+    if hap_genotype_path:
+        available.add("hap")
+    if vcf_path:
+        available.add("vcf")
+    if not available:
+        raise ValueError("--pca requires --hap-genotype and/or --vcf during reference building.")
+
+    mode = str(pca).strip().lower()
+    if mode == "auto":
+        return available
+    if mode == "both":
+        missing = [name for name in ("hap", "vcf") if name not in available]
+        if missing:
+            raise ValueError(
+                f"--pca both requires both --hap-genotype and --vcf, but missing: {missing}"
+            )
+        return {"hap", "vcf"}
+    if mode in {"hap", "vcf"}:
+        if mode not in available:
+            missing_flag = "--hap-genotype" if mode == "hap" else "--vcf"
+            raise ValueError(f"--pca {mode} requires {missing_flag}.")
+        return {mode}
+    raise ValueError("--pca must be one of: auto, hap, vcf, both")
+
+
+def validate_downsample_proportion(downsample: float) -> float:
+    """Validate the PCA feature downsampling proportion."""
+    downsample = float(downsample)
+    if not (0.0 < downsample <= 1.0):
+        raise ValueError("--downsample must be greater than 0 and less than or equal to 1.")
+    return downsample
+
+
+def downsample_feature_matrix(
+    X: np.ndarray,
+    *,
+    proportion: float = 1.0,
+    rng_seed: int = 0,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    """
+    Randomly downsample PCA feature columns for speed.
+
+    Downsampling is deterministic for a given matrix width because a fixed seed is
+    used by default.
+    """
+    X = np.asarray(X, dtype=float)
+    n_features = int(X.shape[1]) if X.ndim == 2 else 0
+    proportion = validate_downsample_proportion(proportion)
+    if X.ndim != 2 or n_features == 0 or proportion >= 1.0:
+        return X, {
+            "features_before_downsample": n_features,
+            "features_after_downsample": n_features,
+        }
+
+    keep_n = max(1, int(round(n_features * proportion)))
+    keep_n = min(keep_n, n_features)
+    if keep_n == n_features:
+        return X, {
+            "features_before_downsample": n_features,
+            "features_after_downsample": n_features,
+        }
+
+    rng = np.random.default_rng(rng_seed)
+    keep_idx = np.sort(rng.choice(n_features, size=keep_n, replace=False))
+    return X[:, keep_idx], {
+        "features_before_downsample": n_features,
+        "features_after_downsample": keep_n,
+    }
 
 
 def _hap_sample_feature_matrix(hap_gt: pd.DataFrame, samples: Sequence[str]) -> Tuple[np.ndarray, List[str]]:
@@ -1574,7 +1739,8 @@ def build_reference_files(
     contigs: Optional[Set[str]] = None,
     require_marker: Optional[bool] = None,
     verbose: bool = False,
-    pca: bool = False,
+    pca: Optional[str] = None,
+    downsample: float = 1.0,
     prefix: str = "reference",
 ) -> Dict[str, Optional[str]]:
     """
@@ -1590,39 +1756,60 @@ def build_reference_files(
     else:
         clades = sorted(set(membership["clade"]))
     effective_require_marker = resolve_require_marker(require_marker, vcf_path, hap_genotype_path)
+    pca_targets = resolve_pca_targets(
+        pca,
+        hap_genotype_path=hap_genotype_path,
+        vcf_path=vcf_path,
+    )
+    downsample = validate_downsample_proportion(downsample)
 
     sample_to_clade = dict(zip(membership["sample"], membership["clade"]))
 
-    if verbose: print(f"Loaded reference membership: \n{membership["clade"].value_counts()}")
-    if verbose: print(f"The next steps make take some time to run...")
+    if verbose:
+        counts = membership_clade_counts(membership, clades)
+        print(
+            f"Loaded reference membership file with {len(membership)} samples:\n"
+            f"{counts.to_string()}"
+        )
 
     if hap_genotype_path:
         hap_freq_df, hap_lookup, membership = calculate_hap_reference_frequencies(
-            hap_genotype_path, membership_path, clades)
+            hap_genotype_path, membership_path, clades, verbose=verbose)
         hap_freq_path = Path(outdir) / f"{prefix}_hap_allele_frequencies.tsv"
-        hap_lookup_path = Path(outdir) / f"{prefix}_hap_allele_frequency_lookup.pkl"
         hap_inf_path = Path(outdir) / f"{prefix}_hap_allele_informativeness.tsv"
         hap_freq_df.to_csv(hap_freq_path, sep="\t", index=False)
-        with open(hap_lookup_path, "wb") as f:
-            pickle.dump(hap_lookup, f)
         if verbose: print(f"Calculated haplotype allele frequencies for clades: {clades}")
         
 
         hap_allele_informativeness(hap_lookup, clades).to_csv(hap_inf_path, sep="\t", index=False)
         if verbose: print(f"Calculated haplotype allele informativeness.")
 
-        if pca:
+        if "hap" in pca_targets:
             if verbose: print(f"Loading hap_genotype matrix for PCA...")
             hap_gt = load_hap_genotypes(hap_genotype_path)
-            if verbose: print(f"Running PCA on the hap_genotype {hap_gt.shape} matrix...")
-            ref_samples = [s for s in hap_gt.columns if s in sample_to_clade]
+            ref_samples, _ = select_reference_samples(
+                hap_gt.columns,
+                sample_to_clade,
+                clades,
+                "hap_genotype columns",
+            )
             X, _ = _hap_sample_feature_matrix(hap_gt, ref_samples)
+            X, downsample_info = downsample_feature_matrix(X, proportion=downsample)
+            if verbose:
+                print(
+                    f"Running PCA on the hap_genotype reference sample matrix: "
+                    f"{X.shape[0]} samples x {X.shape[1]} haplotype-allele features...")
+                if downsample != 1:
+                    print(
+                        f"Downsampled feature matrix to {downsample:g} of features "
+                        f"({downsample_info['features_after_downsample']} of "
+                        f"{downsample_info['features_before_downsample']} total features retained)."
+                    )
             outputs.update(write_reference_pca_and_metrics(
                 matrix=X, samples=ref_samples, membership=membership, outdir=outdir, prefix=f"{prefix}_hap"
             ))
         outputs.update({
             "hap_frequencies": str(hap_freq_path),
-            "hap_frequency_lookup": str(hap_lookup_path),
             "hap_informativeness": str(hap_inf_path),
         })
 
@@ -1640,11 +1827,34 @@ def build_reference_files(
         variant_inf.to_csv(variant_path, sep="\t", index=False)
         locus_inf.to_csv(locus_path, sep="\t", index=False)
         header_samples = get_vcf_samples(vcf_path)
-        ref_samples = [s for s in header_samples if s in sample_to_clade]
-        if pca:
+        ref_samples, matched_counts = select_reference_samples(
+            header_samples,
+            sample_to_clade,
+            clades,
+            "VCF header",
+        )
+        if "vcf" in pca_targets:
             if verbose: print(f"Loading VCF matrix for PCA...")
+            if verbose:
+                print(
+                    f"Found {len(ref_samples)} of {len(membership)} reference membership samples "
+                    f"in the VCF file."
+                )
             X = _vcf_sample_feature_matrix(vcf_path, ref_samples, contigs=contigs)
-            if verbose: print(f"Running PCA on the VCF {X.shape} matrix...")
+            X, downsample_info = downsample_feature_matrix(X, proportion=downsample)
+            if verbose:
+                if downsample != 1:
+                    print(
+                        f"Running PCA on the VCF reference sample matrix: "
+                        f"{X.shape[0]} samples x {X.shape[1]} variant-dosage features "
+                        f"after downsampling from {downsample_info['features_before_downsample']} total "
+                        f"features (downsample={downsample:g})..."
+                    )
+                else:
+                    print(
+                        f"Running PCA on the VCF reference sample matrix: "
+                        f"{X.shape[0]} samples x {X.shape[1]} variant-dosage features..."
+                    )
             pca_outputs = write_reference_pca_and_metrics(
                 matrix=X, samples=ref_samples, membership=membership, outdir=outdir, prefix=f"{prefix}_vcf")
             outputs.update({
@@ -3108,6 +3318,8 @@ def run_lai_hmm(
     show_plots: bool = False,
     save_outputs: bool = True,
     write_log: bool = True,
+    reference_pca: Optional[str] = None,
+    reference_pca_downsample: float = 1.0,
     verbose: bool = True,
     debug: bool = False,
     **hmm_kwargs
@@ -3154,9 +3366,16 @@ def run_lai_hmm(
             vcf_path=vcf_path if vcf_path else None,
             contigs=contigs,
             require_marker=effective_require_marker,
+            pca=reference_pca,
+            downsample=reference_pca_downsample,
+            verbose=verbose,
         )
         variant_profiles_path = variant_profiles_path or reference_paths.get("variant_profiles")
-        hap_freq_lookup_path = hap_freq_lookup_path or reference_paths.get("hap_frequency_lookup")
+        hap_freq_lookup_path = (
+            hap_freq_lookup_path
+            or reference_paths.get("hap_frequencies")
+            or reference_paths.get("hap_frequency_lookup")
+        )
         hap_informativeness_path = hap_informativeness_path or reference_paths.get("hap_informativeness")
 
     if vcf_path and not variant_profiles_path:
@@ -3726,7 +3945,7 @@ def build_arg_parser():
         epilog="""
 Examples:
   Build reference files only:
-    python LAI_HMM_v0.4.py --step build-reference --hap-genotype example_data/hap_genotype_refset_example --vcf example_data/example_refset.vcf.gz --reference-membership example_data/example_reference_membership.tsv --clades EA,Mus,NA1,NA2,Vv --reference-outdir demo_reference --pca
+    python LAI_HMM_v0.4.py --step build-reference --hap-genotype example_data/hap_genotype_refset_example.gz --vcf example_data/example_refset.vcf.gz --reference-membership example_data/example_reference_membership.tsv --clades EA,Mus,NA,Vv --reference-outdir demo_reference --pca both --downsample 0.5
 
   VCF only:
     python LAI_HMM_v0.4.py --vcf example_data/example_samples.vcf.gz --variant-profiles example_data/reference_variant_profiles.tsv --marker-positions example_data/marker_positions.csv --no-plots --sample SAMPLE1
@@ -3753,7 +3972,27 @@ Examples:
     inputs.add_argument("--mus-hap-alleles", dest="mus_hap_alleles", help="Optional Mus chr20 diagnostic hap allele CSV/TSV.")
     inputs.add_argument("--nonmus-hap-alleles", dest="nonmus_hap_alleles", help="Optional non-Mus chr7 diagnostic hap allele CSV/TSV.")
     inputs.add_argument("--chrom-lengths", "--chrom_lengths", dest="chrom_lengths", help="Optional chromosome length table or FASTA .fai for plotting.")
-    inputs.add_argument("--pca", action="store_true", help="Run PCA on reference samples and save PCA coordinates, metrics, and plots as reference outputs. Requires --step build-reference.")
+    inputs.add_argument(
+        "--pca",
+        nargs="?",
+        const="auto",
+        choices=["auto", "hap", "vcf", "both"],
+        default=None,
+        help=(
+            "During reference-building, run PCA on reference samples and save PCA coordinates, "
+            "metrics, and plots. Use --pca alone to run on whichever of --hap-genotype and/or "
+            "--vcf were provided, or specify one of: hap, vcf, both."
+        ),
+    )
+    inputs.add_argument(
+        "--downsample",
+        type=float,
+        default=1.0,
+        help=(
+            "During PCA for reference-building, randomly retain this proportion of feature columns "
+            "before PCA. Default 1 uses the full matrix; 0.5 keeps about half of the features."
+        ),
+    )
 
     samples = parser.add_argument_group("samples and output")
     samples.add_argument("--sample", action="append", help="Sample name to run. Can be repeated or comma-separated.")
@@ -3801,6 +4040,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     clades = _validate_clades([c.strip() for c in args.clades.split(",") if c.strip()])
     reference_outdir = args.reference_outdir or str(Path(args.outdir) / "reference")
+    try:
+        downsample = validate_downsample_proportion(args.downsample)
+    except ValueError as e:
+        parser.error(str(e))
 
     if args.step == "build-reference":
         if not args.reference_membership:
@@ -3813,6 +4056,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             vcf_path=args.vcf,
             verbose=args.verbose,
             pca=args.pca,
+            downsample=downsample,
             contigs=parse_contigs(args.contigs),
             require_marker=False if args.allow_missing_marker else None,
         )
@@ -3871,6 +4115,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         make_plots=args.plots,
         show_plots=args.show_plots,
         save_outputs=args.save_outputs,
+        reference_pca=args.pca,
+        reference_pca_downsample=downsample,
         verbose=args.verbose,
         debug=args.debug,
         lam_per_Mb=args.lam_per_Mb,
