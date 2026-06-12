@@ -126,6 +126,32 @@ def chrom_to_numeric(chrom):
         return int(match.group())
     return pd.NA
 
+
+def canonical_variant_chrom(chrom: Any) -> str:
+    """
+    Normalize variant chromosome labels for lookup keys.
+
+    This makes profile tables and VCFs more robust to naming differences such as
+    `1` vs `chr01` while leaving marker-level physical positions to the
+    user-supplied marker_positions table when one is provided.
+    """
+    if pd.isna(chrom):
+        return ""
+    chrom_num = chrom_to_numeric(chrom)
+    if pd.notna(chrom_num):
+        return str(int(chrom_num))
+    return str(chrom).strip()
+
+
+def variant_site_key(chrom: Any, pos: Any) -> Tuple[str, int]:
+    """Canonical `(chrom, pos)` key for per-site variant lookups."""
+    return (canonical_variant_chrom(chrom), int(pos))
+
+
+def variant_allele_key(chrom: Any, pos: Any, allele: Any) -> Tuple[str, int, str]:
+    """Canonical `(chrom, pos, allele)` key for per-allele variant lookups."""
+    return (canonical_variant_chrom(chrom), int(pos), str(allele).upper())
+
 # VCF parsing with cyvcf2
 @dataclass
 class VCFVariant:
@@ -530,12 +556,10 @@ def _variant_lookup_from_prof(prof_df: pd.DataFrame) -> Dict[Tuple[str,int,str],
     work["ALLELE"] = work["ALLELE"].astype(str)
 
     # build the lookup
-    lut = (
-        work
-        .set_index(["CHROM","POS","ALLELE"])[col]
-        .astype(float)
-        .to_dict()
-    )
+    lut = {
+        variant_allele_key(row.CHROM, row.POS, row.ALLELE): float(getattr(row, col))
+        for row in work[["CHROM", "POS", "ALLELE", col]].itertuples(index=False)
+    }
     return lut
     
 
@@ -562,12 +586,12 @@ def sum_In_per_marker_sample(
     for t, m in enumerate(marker_order):
         site_scores = []
         for v in by_marker.get(m, []):
-            chrom = str(v.chrom)
+            chrom = v.chrom
             pos   = int(v.pos)
             # gt_alleles is a tuple like ('A','A') or ('A','G')
             a1, a2 = v.gt_alleles if isinstance(v.gt_alleles, (tuple,list)) and len(v.gt_alleles)==2 else (None, None)
-            s1 = varLUT.get((chrom, pos, str(a1)), 0.0) if a1 else 0.0
-            s2 = varLUT.get((chrom, pos, str(a2)), 0.0) if a2 else 0.0
+            s1 = varLUT.get(variant_allele_key(chrom, pos, a1), 0.0) if a1 else 0.0
+            s2 = varLUT.get(variant_allele_key(chrom, pos, a2), 0.0) if a2 else 0.0
             site_scores.append(_fuse_noisy_or([s1, s2]))  # per-site diploid fuse
         out[t] = _fuse_noisy_or(site_scores) if site_scores else 0.0
     return out
@@ -631,7 +655,7 @@ def sum_In_per_marker(variants: List["VCFVariant"],
     for t, m in enumerate(marker_order):
         total = 0.0
         for v in by_marker.get(m, []):
-            key = (str(v.chrom), int(v.pos))
+            key = variant_site_key(v.chrom, v.pos)
             try:
                 total += float(variant_inf.loc[key])
             except KeyError:
@@ -864,14 +888,14 @@ def load_variant_profiles(tsv_path: str, clades: Optional[Sequence[str]] = None)
     # build frequency map
     freq_map: Dict[Tuple[str,int,str], np.ndarray] = {}
     for _, row in df.iterrows():
-        chrom = str(row["CHROM"])
+        chrom = canonical_variant_chrom(row["CHROM"])
         pos = int(row["POS"])
         allele = str(row["ALLELE"]).upper()
         vec = np.array([row[c] for c in clades], dtype=float)
         # clip for numeric stability
         eps = 1e-12
         vec = np.clip(vec, eps, 1.0 - eps)
-        freq_map[(chrom, pos, allele)] = vec
+        freq_map[variant_allele_key(chrom, pos, allele)] = vec
     return df, freq_map
 
 # ---------------------------
@@ -2186,7 +2210,7 @@ def build_logB_unordered_from_variants_v4(
     # allele frequency accessor
     af_cache: Dict[Tuple[str,int,str], np.ndarray] = {}
     def allele_freq(chrom, pos, allele):
-        key = (str(chrom), int(pos), str(allele).upper())
+        key = variant_allele_key(chrom, pos, allele)
         f = af_cache.get(key)
         if f is None:
             f = freq_map.get(key)
@@ -2225,15 +2249,15 @@ def build_logB_unordered_from_variants_v4(
     prof_work["POS"]   = prof_work["POS"].astype(int)
     prof_work["ALLELE"] = prof_work["ALLELE"].astype(str)
 
-    spec_LUT = pd.Series(
-        prof_work["specific"].to_numpy(),
-        index=pd.MultiIndex.from_frame(prof_work[["CHROM","POS","ALLELE"]])
-    ).to_dict()
+    spec_LUT = {
+        variant_allele_key(row.CHROM, row.POS, row.ALLELE): float(row.specific)
+        for row in prof_work[["CHROM", "POS", "ALLELE", "specific"]].itertuples(index=False)
+    }
 
     # also gather other alleles present at each site (for hom tempering partner-mean)
     site2alleles = defaultdict(list)
     for (c, p, al) in freq_map.keys():
-        site2alleles[(str(c), int(p))].append(str(al).upper())
+        site2alleles[variant_site_key(c, p)].append(str(al).upper())
 
     # ---- main loop
     T = len(marker_order)
@@ -2254,7 +2278,7 @@ def build_logB_unordered_from_variants_v4(
             if not isinstance(v.gt_alleles, (tuple, list)) or len(v.gt_alleles) != 2:
                 continue
 
-            chrom = str(v.chrom); pos = int(v.pos)
+            chrom = v.chrom; pos = int(v.pos)
             a = str(v.gt_alleles[0]).upper()
             b = str(v.gt_alleles[1]).upper()
 
@@ -2269,7 +2293,7 @@ def build_logB_unordered_from_variants_v4(
                 # and site-specific tempering for uninformative sites
                 p_hom = pa[ii] * pa[jj]
 
-                site_key = (chrom, pos)
+                site_key = variant_site_key(chrom, pos)
                 alleles_here = site2alleles.get(site_key, ())
                 other_vec = None; other_cnt = 0
                 for y in alleles_here:
@@ -2295,8 +2319,8 @@ def build_logB_unordered_from_variants_v4(
             site_logps.append(np.log(p))
 
             # ---- site weight from allele-specific informativeness
-            s1 = float(spec_LUT.get((chrom, pos, a), 0.0))
-            s2 = float(spec_LUT.get((chrom, pos, b), 0.0))
+            s1 = float(spec_LUT.get(variant_allele_key(chrom, pos, a), 0.0))
+            s2 = float(spec_LUT.get(variant_allele_key(chrom, pos, b), 0.0))
             S_site = max(0.0, s1 + s2) # additive in nats
             site_weights.append(S_site)
 
@@ -2421,15 +2445,16 @@ def uninformative_marker_breakdown(
         by_marker.setdefault(str(v.marker), []).append(v)
 
     allele_not_in_reference = np.zeros(T, dtype=bool)  # any observed allele lacks profile (variant-level)
-    missing_genotype        = np.zeros(T, dtype=bool)  # no complete diploid GT at any site (variant-level)
-    no_variants             = np.zeros(T, dtype=bool)
+    missing_genotype        = np.zeros(T, dtype=bool)  # marker has variant records, but all sample GTs are missing
+    no_variants             = np.zeros(T, dtype=bool)  # marker has zero VCF records in this sample cohort/chunk
+    no_nonmissing_variants  = np.zeros(T, dtype=bool)  # marker has no usable non-missing variant genotype for this sample
     variant_missing_pct     = np.zeros(T, dtype=float) # % missing GT among variant sites in the marker amplicon
 
     for t, m in enumerate(marker_order):
         varlist = by_marker.get(m, [])
         if not varlist:
             no_variants[t] = True
-            missing_genotype[t] = True
+            no_nonmissing_variants[t] = True
             variant_missing_pct[t] = 100.0
             continue
 
@@ -2449,8 +2474,8 @@ def uninformative_marker_breakdown(
                     continue
             has_any_genotyped_variant = True
 
-            key_a = (str(v.chrom), int(v.pos), str(a).upper())
-            key_b = (str(v.chrom), int(v.pos), str(b).upper())
+            key_a = variant_allele_key(v.chrom, v.pos, a)
+            key_b = variant_allele_key(v.chrom, v.pos, b)
             if (key_a not in freq_map) or (key_b not in freq_map):
                 missing_in_profiles = True
                 
@@ -2459,6 +2484,7 @@ def uninformative_marker_breakdown(
 
         if not has_any_genotyped_variant:
             missing_genotype[t] = True
+            no_nonmissing_variants[t] = True
         if has_any_genotyped_variant and missing_in_profiles:
             allele_not_in_reference[t] = True
 
@@ -2486,9 +2512,7 @@ def uninformative_marker_breakdown(
                 hap_missing_in_reference[t] = True
 
     # Check whether both haplotype ID and variants are missing 
-    all_variants_missing = ((variant_missing_pct >= 100.0 - tol) |  # every site missing
-                            missing_genotype |                      # no complete diploid GT anywhere
-                            no_variants   )                       # marker had zero variant records
+    all_variants_missing = no_nonmissing_variants
 
     hap_and_all_variants_missing = hap_missing_genotype & all_variants_missing
 
@@ -2501,6 +2525,7 @@ def uninformative_marker_breakdown(
         "variant_missing_pct": np.round(variant_missing_pct, round_decimals),
         "variant_no_variants": no_variants,
         "variant_missing_genotype": missing_genotype,
+        "variant_no_nonmissing_variants": no_nonmissing_variants,
         "variant_allele_not_in_reference": allele_not_in_reference,
         # Hap-level flags
         "hap_missing_genotype": hap_missing_genotype,
@@ -2519,6 +2544,7 @@ def uninformative_marker_breakdown(
         "by_reason": {
             "variant_no_variants": int(no_variants.sum()),
             "variant_missing_genotype": int(missing_genotype.sum()),
+            "variant_no_nonmissing_variants": int(no_nonmissing_variants.sum()),
             "variant_allele_not_in_reference": int(allele_not_in_reference.sum()),
             "hap_missing_genotype": int(hap_missing_genotype.sum()),
             "hap_missing_in_reference": int(hap_missing_in_reference.sum()),
@@ -3031,7 +3057,7 @@ def run_unordered_hmm_from_vcf(
     elif has_hap_input:
         missing_markers = details["hap_missing_genotype"]
     else:
-        missing_markers = details["variant_missing_genotype"] | details["variant_no_variants"]
+        missing_markers = details["variant_no_nonmissing_variants"]
 
     if verbose==True or debug==True:
         print(f"Uninformative: {summary['uninformative_total']}/{summary['total_markers']}")
@@ -3042,7 +3068,7 @@ def run_unordered_hmm_from_vcf(
             )
         if has_variant_input:
             print(
-            f"\t markers with all missing variants: {summary['by_reason']['variant_missing_genotype']}"
+            f"\t markers with all variants missing for this sample: {summary['by_reason']['variant_no_nonmissing_variants']}"
             )
         if has_hap_input and has_variant_input:
             print(
@@ -3874,8 +3900,10 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
 
     # Aesthetics
     pad = 0.05 * maxL   # 2% of the chromosome length padding on either side
+    top_track_pad = 0.55
+    bottom_track_pad = 0.45
     ax.set_xlim(-pad, maxL + pad) # set x-axis limit to max chrom length + padding
-    ax.set_ylim(len(chromosome_items) - 0.5, -0.5)
+    ax.set_ylim(len(chromosome_items) - 0.5 + bottom_track_pad, -0.5 - top_track_pad)
 
     # Format x-axis ticks in Mbp (bp / 1e6)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x/1e6:.0f}"))
@@ -3885,8 +3913,7 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
     ax.set_yticklabels([_chrom_display_label(chrom) for chrom, _ in chromosome_items], fontsize=20)
     ax.tick_params(axis='y', length=0, pad=12, labelsize=20)
     ax.tick_params(axis='x', labelsize=20)
-    ax.set_title(f"Clade Assignment for {indv}", fontsize=20)
-    fig.tight_layout()
+    ax.set_title(f"Clade Assignment for {indv}", fontsize=20, pad=16)
 
     # Legend
     unique_clades = [c for c in requested_clades if c in observed_clades]
@@ -3906,18 +3933,28 @@ def chromosome_painting(hap_long, clade_percentages, indv, params, chromlengths,
               bbox_to_anchor=(0.97, 0.98), loc='upper center', fontsize=20, title_fontsize=20,
              framealpha=1)
 
-    # Print warning message or other annotations on the plot
+    # Print warning message or other annotations under the main title.
+    header_note = None
     if annotation != None and message != None:
-        plt.suptitle(f"{annotation}\n {message}", y=0.97)
-    if annotation != None and message == None:
-        plt.suptitle(annotation, y=0.96, fontsize=14)
-    if annotation == None and message != None:
-        plt.suptitle(f"{message}", y=0.96, fontsize=14)
+        header_note = f"{annotation}\n{message}"
+    elif annotation != None:
+        header_note = annotation
+    elif message != None:
+        header_note = message
+    if header_note:
+        ax.text(
+            0.5, 1.01, header_note,
+            transform=ax.transAxes,
+            ha="center", va="bottom",
+            fontsize=14,
+            multialignment="center",
+        )
 
     # Print version number on the plot
     version_label = f"version: {p.get('refv', 'NA')}_v{p.get('modelv', 'NA')}_{p.get('vcf_refv', 'NA')}"
     fig.text(0.01, 0.01, # bottom left corner
              version_label, ha="left", va="bottom", fontsize=8)
+    fig.tight_layout(rect=[0.03, 0.04, 0.98, 0.96])
     
     # Save
     if savefig == True:

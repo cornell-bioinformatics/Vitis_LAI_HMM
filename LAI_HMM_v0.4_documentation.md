@@ -211,7 +211,7 @@ Plotting is enabled by default. If you do not provide chromosome lengths, includ
 
 ### 1. Calculate clade-specific allele frequencies from reference samples
 
-`--step build-reference` is a helper to create clade-specific allele frequency files from VCF and/or hap_genotype files.
+`--step build-reference` is a helper to calculate clade-specific allele frequencies from VCF and/or hap_genotype files containing non-admixed reference samples.
 You can build only haplotype reference files by omitting `--vcf`, or only VCF reference files by omitting `--hap-genotype`.
 The optional `--pca` option runs principal component analysis of the reference samples and computes population differentiation metrics to help evaluate how distinct the clades/groups are.
 Use `--pca` by itself to run PCA on whichever reference input types were provided, or specify `--pca hap`, `--pca vcf`, or `--pca both` to control the source explicitly.
@@ -256,7 +256,7 @@ python LAI_HMM_v0.4.py \
   --marker-positions example_data/marker_positions.csv \
   --chrom-lengths example_data/chrom_lengths.fai \
   --clades EA,Mus,NA1,NA2,Vv \
-  --outdir results_vcf_only
+  --outdir example_output/results_vcf_only
 ```
 
 ### 4. Run hap_genotype-only LAI with precomputed haplotype frequencies
@@ -678,3 +678,12 @@ python LAI_HMM_v0.4.py \
   --clades EA,Mus,NA1,NA2,Vv \
   --outdir reference
 ```
+
+##### Warning: Many missing markers. Results may be unreliable.
+
+This message prints to the console and on the chromosome painting images when more than 50% of the amplicon markers are missing genotype calls (in both the VCF and the hap_genotype files, if both are provided). Caution should therefore be used in interpreting the ancestry assignments since there is less information available to infer the ancestry, and small ancestry tracts in regions with missing markers may not be detected. The x-axis ticks underneath the chromosomes in the chromosome painting plot show the position of all markers that were _not missing_. 
+
+
+##### Warning: Many uninformative markers. Results may be unreliable.
+
+This message prints to the console and on the chromosome painting images when more than 70% of the amplicon markers are uninfrmative (the probability of ancestry assignment accross the clades/groups is essentially flat). This means that even though the genotype data it is not providing useful information for ancestry inference. Possible causes include a combination of missing data and uninformative alleles with frequencies that do not differ between the clades/groups.
